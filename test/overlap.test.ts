@@ -29,11 +29,12 @@ describe("cron-safe overlap prevention", () => {
     expect(task).toHaveBeenCalledTimes(1);
 
     // Try to trigger second execution while first is running
-    await cronTask.trigger();
+    const secondResult = await cronTask.trigger();
 
     // Second execution should be skipped
     expect(task).toHaveBeenCalledTimes(1);
     expect(onOverlapSkip).toHaveBeenCalledTimes(1);
+    expect(secondResult).toBeUndefined();
 
     // Complete first execution
     resolveFirst!();
@@ -100,9 +101,10 @@ describe("cron-safe overlap prevention", () => {
     expect(onError).toHaveBeenCalledWith(error);
 
     // Second execution should work (lock released after failure)
-    await cronTask.trigger();
+    const result = await cronTask.trigger();
     expect(task).toHaveBeenCalledTimes(2);
     expect(onSuccess).toHaveBeenCalledWith("success");
+    expect(result).toBe("success");
   });
 
   it("should maintain correct status during execution", async () => {
@@ -176,5 +178,33 @@ describe("cron-safe overlap prevention", () => {
 
     // Total: first task called once, second was skipped
     expect(task).toHaveBeenCalledTimes(1);
+  });
+
+  it("should track overlap skips correctly in history", async () => {
+    let resolveTask: () => void;
+    const taskPromise = new Promise<string>((resolve) => {
+      resolveTask = () => resolve("done");
+    });
+
+    const task = vi.fn().mockImplementation(() => taskPromise);
+
+    const cronTask = schedule("* * * * *", task, {
+      preventOverlap: true,
+    });
+
+    // Start first execution
+    const firstTrigger = cronTask.trigger();
+
+    // Try second (will be skipped)
+    await cronTask.trigger();
+
+    // Complete first
+    resolveTask!();
+    await firstTrigger;
+
+    // Only the completed execution should be in history
+    const history = cronTask.getHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0].status).toBe("success");
   });
 });

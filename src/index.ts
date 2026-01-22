@@ -1,9 +1,20 @@
 import cron from "node-cron";
-import type { CronSafeOptions, CronSafeTask, CronTask } from "./types.js";
+import type {
+  CronSafeOptions,
+  CronSafeTask,
+  CronTask,
+  RunHistory,
+} from "./types.js";
 import { createProtectedTask, createTaskState } from "./scheduler.js";
 
 // Re-export types
-export type { CronSafeOptions, CronSafeTask, CronTask } from "./types.js";
+export type {
+  CronSafeOptions,
+  CronSafeTask,
+  CronTask,
+  RunHistory,
+} from "./types.js";
+export { TimeoutError } from "./scheduler.js";
 
 /**
  * Validates a cron expression.
@@ -18,7 +29,7 @@ export function validate(expression: string): boolean {
 
 /**
  * Schedules a task with automatic retries, overlap prevention,
- * and structured error handling.
+ * timeout, history tracking, and structured error handling.
  *
  * @param cronExpression - A valid cron expression
  * @param task - The function to execute on schedule
@@ -30,14 +41,26 @@ export function validate(expression: string): boolean {
  * import { schedule } from 'cron-safe';
  *
  * const task = schedule('* * * * *', async () => {
- *   await fetchData();
+ *   const data = await fetchData();
+ *   return data;
  * }, {
  *   name: 'data-fetcher',
  *   retries: 3,
  *   retryDelay: 1000,
  *   preventOverlap: true,
+ *   executionTimeout: 30000,
+ *   historyLimit: 20,
  *   onError: (err) => console.error('Task failed:', err),
  * });
+ *
+ * // Get execution history
+ * console.log(task.getHistory());
+ *
+ * // Get next scheduled run
+ * console.log(task.nextRun());
+ *
+ * // Manual trigger with result
+ * const result = await task.trigger();
  *
  * // Later, to stop:
  * task.stop();
@@ -47,7 +70,7 @@ export function schedule<T = unknown>(
   cronExpression: string,
   task: CronTask<T>,
   options: CronSafeOptions<T> = {},
-): CronSafeTask {
+): CronSafeTask<T> {
   // Create shared state for this task
   const state = createTaskState();
 
@@ -82,7 +105,16 @@ export function schedule<T = unknown>(
   }
 
   // Create the underlying node-cron task
-  const cronTask = cron.schedule(cronExpression, protectedTask, cronOptions);
+  const cronTask = cron.schedule(
+    cronExpression,
+    () => {
+      // Fire-and-forget for scheduled runs (don't block node-cron)
+      protectedTask("schedule").catch(() => {
+        // Error already handled by onError hook
+      });
+    },
+    cronOptions,
+  );
 
   // Return our wrapper object
   return {
@@ -98,8 +130,32 @@ export function schedule<T = unknown>(
 
     getStatus: () => state.status,
 
-    trigger: async () => {
-      await protectedTask();
+    trigger: async (): Promise<T | undefined> => {
+      return protectedTask("manual");
+    },
+
+    getHistory: (): RunHistory[] => {
+      // Return a copy to prevent external mutation
+      return [...state.history];
+    },
+
+    nextRun: (): Date | null => {
+      if (state.status === "stopped") {
+        return null;
+      }
+
+      try {
+        // node-cron's ScheduledTask has a method to get next dates
+        // We need to use the internal cronTime or parse the expression
+        const cronParser = require("cron-parser");
+        const interval = cronParser.parseExpression(cronExpression, {
+          tz: options.timezone,
+        });
+        return interval.next().toDate();
+      } catch {
+        // If parsing fails, return null
+        return null;
+      }
     },
   };
 }

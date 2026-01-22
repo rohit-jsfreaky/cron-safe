@@ -1,7 +1,7 @@
 {
   "name": "cron-safe",
   "version": "1.0.0",
-  "description": "A robust wrapper around node-cron with automatic retries, overlap prevention, and structured error handling for reliable scheduled tasks",
+  "description": "A robust wrapper around node-cron with automatic retries, overlap prevention, execution timeout, history tracking, and structured error handling",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -50,7 +50,11 @@
     "typescript",
     "async",
     "error-handling",
-    "production-ready"
+    "production-ready",
+    "timeout",
+    "execution-timeout",
+    "history",
+    "audit-log"
   ],
   "author": "Rohit Kumar Kashyap <rohitkashyapmrt@gmail.com>",
   "license": "MIT",
@@ -61,6 +65,9 @@
   "homepage": "https://github.com/rohit-jsfreaky/cron-safe#readme",
   "bugs": {
     "url": "https://github.com/rohit-jsfreaky/cron-safe/issues"
+  },
+  "dependencies": {
+    "cron-parser": "^4.9.0"
   },
   "peerDependencies": {
     "node-cron": ">=3.0.0"

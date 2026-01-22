@@ -20,12 +20,13 @@ describe("cron-safe retry functionality", () => {
       onError,
     });
 
-    await cronTask.trigger();
+    const result = await cronTask.trigger();
 
     // 1 initial attempt + 2 retries = 3 total calls
     expect(task).toHaveBeenCalledTimes(3);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(error);
+    expect(result).toBeUndefined();
   });
 
   it("should call onRetry with correct attempt number", async () => {
@@ -47,7 +48,7 @@ describe("cron-safe retry functionality", () => {
     expect(onRetry).toHaveBeenNthCalledWith(3, error, 3);
   });
 
-  it("should stop retrying after success", async () => {
+  it("should stop retrying after success and return result", async () => {
     const error = new Error("Task failed");
     const task = vi
       .fn()
@@ -63,12 +64,13 @@ describe("cron-safe retry functionality", () => {
       onError,
     });
 
-    await cronTask.trigger();
+    const result = await cronTask.trigger();
 
     // Should stop after success on 3rd attempt
     expect(task).toHaveBeenCalledTimes(3);
     expect(onSuccess).toHaveBeenCalledWith("success");
     expect(onError).not.toHaveBeenCalled();
+    expect(result).toBe("success");
   });
 
   it("should respect retryDelay between attempts", async () => {
@@ -144,5 +146,21 @@ describe("cron-safe retry functionality", () => {
 
     // onStart is called once at the beginning, not per retry
     expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("should record failed execution in history", async () => {
+    const error = new Error("Task failed");
+    const task = vi.fn().mockRejectedValue(error);
+
+    const cronTask = schedule("* * * * *", task, {
+      retries: 2,
+    });
+
+    await cronTask.trigger();
+
+    const history = cronTask.getHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0].status).toBe("failed");
+    expect(history[0].error).toEqual(error);
   });
 });

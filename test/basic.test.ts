@@ -35,15 +35,19 @@ describe("cron-safe basic functionality", () => {
       expect(cronTask.stop).toBeTypeOf("function");
       expect(cronTask.getStatus).toBeTypeOf("function");
       expect(cronTask.trigger).toBeTypeOf("function");
+      expect(cronTask.getHistory).toBeTypeOf("function");
+      expect(cronTask.nextRun).toBeTypeOf("function");
     });
 
-    it("should execute the task on trigger", async () => {
-      const task = vi.fn().mockResolvedValue("result");
+    it("should execute the task on trigger and return result", async () => {
+      const expectedResult = { data: "test" };
+      const task = vi.fn().mockResolvedValue(expectedResult);
       const cronTask = schedule("* * * * *", task);
 
-      await cronTask.trigger();
+      const result = await cronTask.trigger();
 
       expect(task).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(expectedResult);
     });
 
     it("should call onStart when task begins", async () => {
@@ -86,9 +90,10 @@ describe("cron-safe basic functionality", () => {
       const onSuccess = vi.fn();
 
       const cronTask = schedule("* * * * *", task, { onSuccess });
-      await cronTask.trigger();
+      const result = await cronTask.trigger();
 
       expect(task).toHaveBeenCalled();
+      expect(result).toBe("sync-result");
       expect(onSuccess).toHaveBeenCalledWith("sync-result");
     });
   });
