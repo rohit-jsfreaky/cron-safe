@@ -58,10 +58,29 @@ export interface CronSafeOptions<T = unknown> extends ScheduleOptions {
   retries?: number;
 
   /**
-   * Delay in milliseconds between retry attempts.
+   * Base delay in milliseconds between retry attempts.
+   * For 'fixed' strategy: this is the exact delay.
+   * For 'linear' strategy: delay = retryDelay * attemptNumber.
+   * For 'exponential' strategy: delay = retryDelay * (2 ^ attemptNumber).
    * @default 0
    */
   retryDelay?: number;
+
+  /**
+   * Backoff strategy for retry delays.
+   * - 'fixed': Same delay every time (default)
+   * - 'linear': Delay increases linearly (delay * attempt)
+   * - 'exponential': Delay doubles each time (delay * 2^attempt)
+   * @default 'fixed'
+   */
+  backoffStrategy?: "fixed" | "linear" | "exponential";
+
+  /**
+   * Maximum delay in milliseconds between retries.
+   * Useful with exponential backoff to cap the delay.
+   * @default undefined (no limit)
+   */
+  maxRetryDelay?: number;
 
   /**
    * If true, prevents a new execution from starting while

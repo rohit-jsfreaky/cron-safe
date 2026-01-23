@@ -35,3 +35,7 @@ coverage/
 # Misc
 .cache/
 .temp/
+cron-safe-test/
+cron-safe-promo/
+.claude
+nul

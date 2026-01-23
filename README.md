@@ -18,6 +18,7 @@ Standard `node-cron` jobs are vulnerable to:
 **cron-safe** wraps your tasks with a protective layer:
 
 - ✅ **Automatic retries** with configurable delays
+- ✅ **Exponential/linear backoff** — smart retry delays that grow over time
 - ✅ **Overlap prevention** — ensures only one instance runs at a time
 - ✅ **Execution timeout** — kills zombie tasks that run too long
 - ✅ **Execution history** — audit log of past runs with status and duration
@@ -71,6 +72,32 @@ const task = schedule('0 * * * *', async () => {
     alertOpsTeam('Critical task failed!', error);
   },
 });
+```
+
+### Exponential & Linear Backoff
+
+Smart retry delays that grow over time, preventing thundering herd problems:
+
+```typescript
+import { schedule } from 'cron-safe';
+
+const task = schedule('0 * * * *', async () => {
+  await unreliableApiCall();
+}, {
+  retries: 5,
+  retryDelay: 1000,           // Base delay: 1 second
+  backoffStrategy: 'exponential',  // 2s, 4s, 8s, 16s, 32s
+  maxRetryDelay: 30000,       // Cap at 30 seconds
+  
+  onRetry: (error, attempt) => {
+    console.log(`Retry ${attempt}, next delay will be longer...`);
+  },
+});
+
+// Available strategies:
+// - 'fixed': Same delay every time (default)
+// - 'linear': delay * attempt (1s, 2s, 3s, 4s, 5s)
+// - 'exponential': delay * 2^attempt (2s, 4s, 8s, 16s, 32s)
 ```
 
 ### Overlap Prevention
@@ -244,7 +271,9 @@ Schedules a task with automatic retries, timeout, and overlap prevention.
 |--------|------|---------|-------------|
 | `name` | `string` | `undefined` | Identifier for logging/debugging |
 | `retries` | `number` | `0` | Number of retry attempts after failure |
-| `retryDelay` | `number` | `0` | Milliseconds to wait between retries |
+| `retryDelay` | `number` | `0` | Base delay in ms between retries |
+| `backoffStrategy` | `'fixed' \| 'linear' \| 'exponential'` | `'fixed'` | How delay grows between retries |
+| `maxRetryDelay` | `number` | `undefined` | Maximum delay cap for backoff |
 | `preventOverlap` | `boolean` | `false` | Skip execution if previous run is active |
 | `executionTimeout` | `number` | `undefined` | Max execution time in ms before timeout |
 | `historyLimit` | `number` | `10` | Max number of history entries to keep |

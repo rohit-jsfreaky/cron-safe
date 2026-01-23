@@ -59,6 +59,8 @@ export function createProtectedTask<T>(
   const {
     retries = 0,
     retryDelay = 0,
+    backoffStrategy = "fixed",
+    maxRetryDelay,
     preventOverlap = false,
     executionTimeout,
     historyLimit = 10,
@@ -69,6 +71,36 @@ export function createProtectedTask<T>(
     onOverlapSkip,
     onTimeout,
   } = options;
+
+  /**
+   * Calculates the delay for a retry attempt based on the backoff strategy.
+   */
+  function calculateRetryDelay(attempt: number): number {
+    let delay: number;
+
+    switch (backoffStrategy) {
+      case "linear":
+        // Linear: delay * attempt (1x, 2x, 3x, ...)
+        delay = retryDelay * attempt;
+        break;
+      case "exponential":
+        // Exponential: delay * 2^attempt (2x, 4x, 8x, ...)
+        delay = retryDelay * Math.pow(2, attempt);
+        break;
+      case "fixed":
+      default:
+        // Fixed: same delay every time
+        delay = retryDelay;
+        break;
+    }
+
+    // Apply max cap if specified
+    if (maxRetryDelay !== undefined && delay > maxRetryDelay) {
+      delay = maxRetryDelay;
+    }
+
+    return delay;
+  }
 
   return async function protectedTask(
     triggeredBy: "schedule" | "manual",
@@ -151,9 +183,10 @@ export function createProtectedTask<T>(
           // Call onRetry hook with current retry number
           onRetry?.(error, attempt);
 
-          // Wait for retry delay if specified
-          if (retryDelay > 0) {
-            await sleep(retryDelay);
+          // Calculate and wait for retry delay based on backoff strategy
+          const delay = calculateRetryDelay(attempt);
+          if (delay > 0) {
+            await sleep(delay);
           }
         }
       }
