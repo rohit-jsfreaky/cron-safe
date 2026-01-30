@@ -7,6 +7,83 @@ import type { ScheduleOptions } from "node-cron";
 export type CronTask<T = unknown> = () => T | Promise<T>;
 
 /**
+ * Payload sent to the notifier callback.
+ */
+export interface NotificationPayload<T = unknown> {
+  /**
+   * Name of the task (from options.name).
+   */
+  taskName: string;
+
+  /**
+   * The event type that triggered this notification.
+   */
+  event: "success" | "error" | "timeout" | "overlapSkip";
+
+  /**
+   * When this event occurred.
+   */
+  timestamp: Date;
+
+  /**
+   * Duration of the execution in milliseconds (if applicable).
+   */
+  duration?: number;
+
+  /**
+   * The result of the task (for success events).
+   */
+  result?: T;
+
+  /**
+   * The error that occurred (for error/timeout events).
+   */
+  error?: Error;
+
+  /**
+   * Number of attempts made before this event.
+   */
+  attemptsMade?: number;
+}
+
+/**
+ * A callback function that receives notifications about task execution.
+ * Can be synchronous or asynchronous.
+ */
+export type Notifier<T = unknown> = (
+  payload: NotificationPayload<T>,
+) => void | Promise<void>;
+
+/**
+ * Configuration for which events trigger notifications.
+ */
+export interface NotifyOn {
+  /**
+   * Notify on successful execution.
+   * @default true
+   */
+  success?: boolean;
+
+  /**
+   * Notify on error (after all retries exhausted).
+   * @default true
+   */
+  error?: boolean;
+
+  /**
+   * Notify on timeout.
+   * @default true
+   */
+  timeout?: boolean;
+
+  /**
+   * Notify when execution is skipped due to overlap.
+   * @default false
+   */
+  overlapSkip?: boolean;
+}
+
+/**
  * Represents a single execution record in the history.
  */
 export interface RunHistory {
@@ -137,6 +214,18 @@ export interface CronSafeOptions<T = unknown> extends ScheduleOptions {
    * @param error - The timeout error
    */
   onTimeout?: (error: Error) => void;
+
+  /**
+   * A callback function to receive notifications about task execution.
+   * Use this to integrate with Slack, email, or custom notification systems.
+   */
+  notifier?: Notifier<T>;
+
+  /**
+   * Configuration for which events trigger notifications.
+   * @default { success: true, error: true, timeout: true, overlapSkip: false }
+   */
+  notifyOn?: NotifyOn;
 }
 
 /**

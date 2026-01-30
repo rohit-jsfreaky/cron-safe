@@ -1,6 +1,6 @@
 {
   "name": "cron-safe",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A robust wrapper around node-cron with automatic retries, overlap prevention, execution timeout, history tracking, and structured error handling",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

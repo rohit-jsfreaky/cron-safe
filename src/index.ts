@@ -12,6 +12,9 @@ export type {
   CronSafeOptions,
   CronSafeTask,
   CronTask,
+  NotificationPayload,
+  Notifier,
+  NotifyOn,
   RunHistory,
 } from "./types.js";
 export { TimeoutError } from "./scheduler.js";

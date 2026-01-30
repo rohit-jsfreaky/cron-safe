@@ -1,4 +1,10 @@
-import type { CronSafeOptions, CronTask, RunHistory } from "./types.js";
+import type {
+  CronSafeOptions,
+  CronTask,
+  NotificationPayload,
+  NotifyOn,
+  RunHistory,
+} from "./types.js";
 import { sleep } from "./utils.js";
 
 /**
@@ -57,6 +63,7 @@ export function createProtectedTask<T>(
   state: TaskState,
 ): (triggeredBy: "schedule" | "manual") => Promise<T | undefined> {
   const {
+    name = "unnamed-task",
     retries = 0,
     retryDelay = 0,
     backoffStrategy = "fixed",
@@ -70,7 +77,31 @@ export function createProtectedTask<T>(
     onError,
     onOverlapSkip,
     onTimeout,
+    notifier,
+    notifyOn = {},
   } = options;
+
+  // Default notification settings
+  const shouldNotify: NotifyOn = {
+    success: notifyOn.success ?? true,
+    error: notifyOn.error ?? true,
+    timeout: notifyOn.timeout ?? true,
+    overlapSkip: notifyOn.overlapSkip ?? false,
+  };
+
+  /**
+   * Sends a notification if a notifier is configured and the event is enabled.
+   * Runs asynchronously and catches errors to avoid breaking task execution.
+   */
+  function sendNotification(payload: NotificationPayload<T>): void {
+    if (!notifier) return;
+    if (!shouldNotify[payload.event]) return;
+
+    // Fire and forget - don't await, don't block task execution
+    Promise.resolve(notifier(payload)).catch((err) => {
+      console.error(`[cron-safe] Notifier error for task "${name}":`, err);
+    });
+  }
 
   /**
    * Calculates the delay for a retry attempt based on the backoff strategy.
@@ -108,6 +139,11 @@ export function createProtectedTask<T>(
     // Overlap check
     if (preventOverlap && state.isRunning) {
       onOverlapSkip?.();
+      sendNotification({
+        taskName: name,
+        event: "overlapSkip",
+        timestamp: new Date(),
+      });
       return undefined;
     }
 
@@ -157,6 +193,14 @@ export function createProtectedTask<T>(
         historyEntry.status = "success";
 
         onSuccess?.(result);
+        sendNotification({
+          taskName: name,
+          event: "success",
+          timestamp: historyEntry.endedAt,
+          duration: historyEntry.duration,
+          result,
+          attemptsMade: attempt,
+        });
         state.isRunning = false;
         state.status = "scheduled";
         return result;
@@ -173,6 +217,14 @@ export function createProtectedTask<T>(
 
           onTimeout?.(error);
           onError?.(error);
+          sendNotification({
+            taskName: name,
+            event: "timeout",
+            timestamp: historyEntry.endedAt,
+            duration: historyEntry.duration,
+            error,
+            attemptsMade: attempt,
+          });
           state.isRunning = false;
           state.status = "scheduled";
           return undefined;
@@ -201,6 +253,14 @@ export function createProtectedTask<T>(
       lastError instanceof Error ? lastError : new Error(String(lastError));
 
     onError?.(lastError);
+    sendNotification({
+      taskName: name,
+      event: "error",
+      timestamp: historyEntry.endedAt,
+      duration: historyEntry.duration,
+      error: historyEntry.error,
+      attemptsMade: attempt,
+    });
     state.isRunning = false;
     state.status = "scheduled";
     return undefined;

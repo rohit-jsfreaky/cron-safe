@@ -24,6 +24,7 @@ Standard `node-cron` jobs are vulnerable to:
 - ✅ **Execution history** — audit log of past runs with status and duration
 - ✅ **Next run predictor** — know exactly when your job runs next
 - ✅ **Async trigger** — manually trigger tasks and await results
+- ✅ **Notification hooks** — integrate with Slack, email, or any notification system
 - ✅ **Lifecycle hooks** — `onStart`, `onSuccess`, `onRetry`, `onError`, `onTimeout`
 
 ## Installation
@@ -207,6 +208,101 @@ console.log('Report:', result);
 // If preventOverlap is true and task is running, returns undefined
 ```
 
+### Notification Hooks
+
+Integrate with Slack, email, or any notification system. The `notifier` callback receives structured payloads when events occur:
+
+```typescript
+import { schedule, NotificationPayload } from 'cron-safe';
+
+const task = schedule('0 * * * *', async () => {
+  await processData();
+}, {
+  name: 'hourly-processor',
+  notifier: (payload: NotificationPayload) => {
+    console.log(`[${payload.taskName}] ${payload.event} at ${payload.timestamp}`);
+    // payload.result - for success events
+    // payload.error - for error/timeout events
+    // payload.duration - execution time in ms
+    // payload.attemptsMade - number of attempts
+  },
+  notifyOn: {
+    success: true,      // default: true
+    error: true,        // default: true
+    timeout: true,      // default: true
+    overlapSkip: false, // default: false
+  },
+});
+```
+
+#### Slack Webhook Adapter
+
+```typescript
+import { schedule, NotificationPayload } from 'cron-safe';
+
+const slackNotifier = async (payload: NotificationPayload) => {
+  const color = payload.event === 'success' ? 'good' : 'danger';
+  
+  await fetch(process.env.SLACK_WEBHOOK_URL!, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      attachments: [{
+        color,
+        title: `Cron Job: ${payload.taskName}`,
+        text: `Event: ${payload.event.toUpperCase()}`,
+        fields: [
+          { title: 'Duration', value: `${payload.duration}ms`, short: true },
+          { title: 'Attempts', value: payload.attemptsMade, short: true },
+        ],
+        ts: Math.floor(payload.timestamp.getTime() / 1000),
+      }],
+    }),
+  });
+};
+
+const task = schedule('0 6 * * *', dailyBackup, {
+  name: 'daily-backup',
+  notifier: slackNotifier,
+  notifyOn: { success: false, error: true }, // Only notify on failures
+});
+```
+
+#### Email Adapter (using nodemailer)
+
+```typescript
+import { schedule, NotificationPayload } from 'cron-safe';
+import nodemailer from 'nodemailer';
+
+const transporter = nodemailer.createTransport({
+  host: 'smtp.example.com',
+  auth: { user: 'user', pass: 'pass' },
+});
+
+const emailNotifier = async (payload: NotificationPayload) => {
+  if (payload.event !== 'error' && payload.event !== 'timeout') return;
+  
+  await transporter.sendMail({
+    from: 'cron@example.com',
+    to: 'ops-team@example.com',
+    subject: `[ALERT] ${payload.taskName} ${payload.event}`,
+    text: `
+Task: ${payload.taskName}
+Event: ${payload.event}
+Time: ${payload.timestamp}
+Duration: ${payload.duration}ms
+Error: ${payload.error?.message ?? 'N/A'}
+Attempts: ${payload.attemptsMade}
+    `,
+  });
+};
+
+const task = schedule('0 0 * * *', nightlyCleanup, {
+  name: 'nightly-cleanup',
+  notifier: emailNotifier,
+});
+```
+
 ### Full Lifecycle Hooks
 
 ```typescript
@@ -283,6 +379,8 @@ Schedules a task with automatic retries, timeout, and overlap prevention.
 | `onError` | `(error) => void` | — | Called when all retries exhausted |
 | `onTimeout` | `(error: Error) => void` | — | Called when task times out |
 | `onOverlapSkip` | `() => void` | — | Called when execution is skipped |
+| `notifier` | `Notifier<T>` | — | Callback for Slack/email/custom notifications |
+| `notifyOn` | `NotifyOn` | `{ success: true, error: true, timeout: true, overlapSkip: false }` | Which events trigger notifications |
 | `timezone` | `string` | — | Timezone for cron schedule |
 | `scheduled` | `boolean` | `true` | Start immediately or wait for `.start()` |
 | `runOnInit` | `boolean` | `false` | Run task immediately on creation |
