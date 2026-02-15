@@ -6,6 +6,10 @@ import type { ScheduleOptions } from "node-cron";
  */
 export type CronTask<T = unknown> = () => T | Promise<T>;
 
+// ===================================================================
+// Notification Types
+// ===================================================================
+
 /**
  * Payload sent to the notifier callback.
  */
@@ -18,7 +22,7 @@ export interface NotificationPayload<T = unknown> {
   /**
    * The event type that triggered this notification.
    */
-  event: "success" | "error" | "timeout" | "overlapSkip";
+  event: "success" | "error" | "timeout" | "overlapSkip" | "lockFailed";
 
   /**
    * When this event occurred.
@@ -81,7 +85,17 @@ export interface NotifyOn {
    * @default false
    */
   overlapSkip?: boolean;
+
+  /**
+   * Notify when distributed lock acquisition fails.
+   * @default false
+   */
+  lockFailed?: boolean;
 }
+
+// ===================================================================
+// History Types
+// ===================================================================
 
 /**
  * Represents a single execution record in the history.
@@ -117,6 +131,175 @@ export interface RunHistory {
    */
   triggeredBy: "schedule" | "manual";
 }
+
+// ===================================================================
+// Distributed Lock Types (Feature 1)
+// ===================================================================
+
+/**
+ * Interface for distributed lock providers.
+ * Implement this to use Redis, PostgreSQL, DynamoDB, etc.
+ */
+export interface LockProvider {
+  /**
+   * Attempt to acquire the lock.
+   * @param key - Unique key for this lock
+   * @param ttl - Time-to-live in milliseconds
+   * @returns A lock ID string if acquired, or null if not
+   */
+  acquire(key: string, ttl: number): Promise<string | null>;
+
+  /**
+   * Release the lock.
+   * @param key - Unique key for this lock
+   * @param lockId - The ID returned by acquire()
+   */
+  release(key: string, lockId: string): Promise<void>;
+
+  /**
+   * Extend the lock TTL (for long-running tasks).
+   * @param key - Unique key for this lock
+   * @param lockId - The ID returned by acquire()
+   * @param ttl - New TTL in milliseconds
+   * @returns true if extended, false if lock was lost
+   */
+  extend?(key: string, lockId: string, ttl: number): Promise<boolean>;
+}
+
+/**
+ * Configuration for distributed locking.
+ */
+export interface DistributedLockConfig {
+  /**
+   * The lock provider implementation.
+   */
+  provider: LockProvider;
+
+  /**
+   * Time-to-live for the lock in milliseconds.
+   * Should be greater than the expected task execution time.
+   * @default 60000 (1 minute)
+   */
+  ttl?: number;
+
+  /**
+   * If true, automatically extends lock TTL while task is running.
+   * Requires the provider to implement extend().
+   * @default false
+   */
+  autoExtend?: boolean;
+
+  /**
+   * Interval in ms for auto-extending the lock.
+   * Should be less than ttl to avoid expiration.
+   * @default ttl / 2
+   */
+  extendInterval?: number;
+}
+
+// ===================================================================
+// Storage Adapter Types (Feature 2)
+// ===================================================================
+
+/**
+ * A serializable run record for persistent storage.
+ */
+export interface StoredRunRecord {
+  taskName: string;
+  startedAt: string; // ISO date string
+  endedAt?: string;
+  duration?: number;
+  status: "running" | "success" | "failed" | "timeout";
+  error?: string;
+  triggeredBy: "schedule" | "manual";
+  retryAttempt?: number;
+  maxRetries?: number;
+}
+
+/**
+ * Interface for persistent storage adapters.
+ * Implement this with PostgreSQL, Redis, SQLite, file-based, etc.
+ */
+export interface StorageAdapter {
+  /**
+   * Save a run record.
+   * @param record - The run record to save
+   */
+  saveRun(record: StoredRunRecord): Promise<void>;
+
+  /**
+   * Update an existing run record (e.g., when it completes).
+   * @param taskName - The task name
+   * @param startedAt - The startedAt timestamp to identify the run
+   * @param updates - The fields to update
+   */
+  updateRun(
+    taskName: string,
+    startedAt: string,
+    updates: Partial<StoredRunRecord>,
+  ): Promise<void>;
+
+  /**
+   * Get recent runs for a task, most recent first.
+   * @param taskName - The task name
+   * @param limit - Max number of records to return
+   */
+  getRuns(taskName: string, limit: number): Promise<StoredRunRecord[]>;
+
+  /**
+   * Get the last incomplete (crashed) run for crash recovery.
+   * @param taskName - The task name
+   * @returns The crash record, or null if none
+   */
+  getLastIncompleteRun?(taskName: string): Promise<StoredRunRecord | null>;
+}
+
+// ===================================================================
+// Metrics Types (Feature 4)
+// ===================================================================
+
+/**
+ * Real-time metrics snapshot for a task.
+ */
+export interface TaskMetrics {
+  totalRuns: number;
+  totalSuccess: number;
+  totalFailures: number;
+  totalTimeouts: number;
+  totalRetries: number;
+  totalOverlapSkips: number;
+  currentRunning: number;
+  avgDuration: number;
+  lastRunAt?: Date;
+  lastStatus?: "success" | "failed" | "timeout";
+}
+
+/**
+ * Interface for metrics export providers.
+ */
+export interface MetricsProvider {
+  /**
+   * Record a run event.
+   * @param taskName - The task name
+   * @param event - The event type
+   * @param duration - Duration in ms (if applicable)
+   */
+  recordEvent(
+    taskName: string,
+    event:
+      | "start"
+      | "success"
+      | "failure"
+      | "timeout"
+      | "retry"
+      | "overlapSkip",
+    duration?: number,
+  ): void;
+}
+
+// ===================================================================
+// Main Options Interface
+// ===================================================================
 
 /**
  * Configuration options for cron-safe scheduler.
@@ -167,6 +350,14 @@ export interface CronSafeOptions<T = unknown> extends ScheduleOptions {
   preventOverlap?: boolean;
 
   /**
+   * Maximum number of concurrent executions allowed.
+   * When set, replaces the binary preventOverlap with a concurrency limit.
+   * If both preventOverlap and maxConcurrency are set, maxConcurrency takes priority.
+   * @default undefined (no limit, unless preventOverlap is true)
+   */
+  maxConcurrency?: number;
+
+  /**
    * Maximum execution time in milliseconds.
    * If the task exceeds this time, it will be considered failed with a timeout error.
    * The task itself won't be forcefully stopped, but the wrapper will treat it as failed.
@@ -179,6 +370,24 @@ export interface CronSafeOptions<T = unknown> extends ScheduleOptions {
    * @default 10
    */
   historyLimit?: number;
+
+  /**
+   * Distributed locking configuration.
+   * When provided, ensures only one instance runs across multiple processes/servers.
+   */
+  distributedLock?: DistributedLockConfig;
+
+  /**
+   * Persistent storage adapter.
+   * When provided, execution history is persisted and crash recovery is enabled.
+   */
+  storage?: StorageAdapter;
+
+  /**
+   * External metrics provider for observability.
+   * When provided, task events are forwarded to the metrics system.
+   */
+  metricsProvider?: MetricsProvider;
 
   /**
    * Called when the task starts executing.
@@ -223,10 +432,14 @@ export interface CronSafeOptions<T = unknown> extends ScheduleOptions {
 
   /**
    * Configuration for which events trigger notifications.
-   * @default { success: true, error: true, timeout: true, overlapSkip: false }
+   * @default { success: true, error: true, timeout: true, overlapSkip: false, lockFailed: false }
    */
   notifyOn?: NotifyOn;
 }
+
+// ===================================================================
+// Return Type
+// ===================================================================
 
 /**
  * The return type of the schedule function.
@@ -250,9 +463,9 @@ export interface CronSafeTask<T = unknown> {
 
   /**
    * Triggers the task immediately, bypassing the cron schedule.
-   * Still respects overlap prevention if enabled.
+   * Still respects overlap/concurrency prevention if enabled.
    * Returns the result of the task execution.
-   * @returns Promise resolving to the task result, or undefined if skipped due to overlap
+   * @returns Promise resolving to the task result, or undefined if skipped
    */
   trigger: () => Promise<T | undefined>;
 
@@ -266,4 +479,15 @@ export interface CronSafeTask<T = unknown> {
    * Returns the next scheduled run time, or null if the task is stopped.
    */
   nextRun: () => Date | null;
+
+  /**
+   * Returns the current metrics snapshot for this task.
+   */
+  getMetrics: () => TaskMetrics;
+
+  /**
+   * Updates the cron schedule dynamically without losing state.
+   * @param newCronExpression - The new cron expression
+   */
+  updateSchedule: (newCronExpression: string) => void;
 }

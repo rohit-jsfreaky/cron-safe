@@ -4,6 +4,7 @@ import type {
   CronSafeTask,
   CronTask,
   RunHistory,
+  TaskMetrics,
 } from "./types.js";
 import { createProtectedTask, createTaskState } from "./scheduler.js";
 
@@ -12,10 +13,16 @@ export type {
   CronSafeOptions,
   CronSafeTask,
   CronTask,
+  DistributedLockConfig,
+  LockProvider,
+  MetricsProvider,
   NotificationPayload,
   Notifier,
   NotifyOn,
   RunHistory,
+  StorageAdapter,
+  StoredRunRecord,
+  TaskMetrics,
 } from "./types.js";
 export { TimeoutError } from "./scheduler.js";
 
@@ -32,7 +39,8 @@ export function validate(expression: string): boolean {
 
 /**
  * Schedules a task with automatic retries, overlap prevention,
- * timeout, history tracking, and structured error handling.
+ * distributed locking, concurrency control, timeout, history tracking,
+ * metrics, persistence, and structured error handling.
  *
  * @param cronExpression - A valid cron expression
  * @param task - The function to execute on schedule
@@ -52,20 +60,19 @@ export function validate(expression: string): boolean {
  *   retryDelay: 1000,
  *   preventOverlap: true,
  *   executionTimeout: 30000,
- *   historyLimit: 20,
+ *   maxConcurrency: 2,
  *   onError: (err) => console.error('Task failed:', err),
  * });
  *
- * // Get execution history
- * console.log(task.getHistory());
+ * // Get metrics
+ * console.log(task.getMetrics());
  *
- * // Get next scheduled run
- * console.log(task.nextRun());
+ * // Update schedule dynamically
+ * task.updateSchedule('0 0 * * *');
  *
  * // Manual trigger with result
  * const result = await task.trigger();
  *
- * // Later, to stop:
  * task.stop();
  * ```
  */
@@ -80,44 +87,87 @@ export function schedule<T = unknown>(
   // Create the protected wrapper
   const protectedTask = createProtectedTask(task, options, state);
 
+  // Mutable reference to current cron expression (for updateSchedule)
+  let currentExpression = cronExpression;
+
   // Build node-cron options, only including defined properties
-  const cronOptions: {
+  function buildCronOptions(): {
     scheduled?: boolean;
     timezone?: string;
     recoverMissedExecutions?: boolean;
     runOnInit?: boolean;
-  } = {};
+  } {
+    const cronOptions: {
+      scheduled?: boolean;
+      timezone?: string;
+      recoverMissedExecutions?: boolean;
+      runOnInit?: boolean;
+    } = {};
 
-  // Only set options that are explicitly provided
-  if (options.scheduled !== undefined) {
-    cronOptions.scheduled = options.scheduled;
-  } else {
-    cronOptions.scheduled = true;
+    if (options.scheduled !== undefined) {
+      cronOptions.scheduled = options.scheduled;
+    } else {
+      cronOptions.scheduled = true;
+    }
+
+    if (options.timezone !== undefined) {
+      cronOptions.timezone = options.timezone;
+    }
+
+    if (options.recoverMissedExecutions !== undefined) {
+      cronOptions.recoverMissedExecutions = options.recoverMissedExecutions;
+    }
+
+    if (options.runOnInit !== undefined) {
+      cronOptions.runOnInit = options.runOnInit;
+    }
+
+    return cronOptions;
   }
 
-  if (options.timezone !== undefined) {
-    cronOptions.timezone = options.timezone;
-  }
-
-  if (options.recoverMissedExecutions !== undefined) {
-    cronOptions.recoverMissedExecutions = options.recoverMissedExecutions;
-  }
-
-  if (options.runOnInit !== undefined) {
-    cronOptions.runOnInit = options.runOnInit;
-  }
-
-  // Create the underlying node-cron task
-  const cronTask = cron.schedule(
-    cronExpression,
-    () => {
-      // Fire-and-forget for scheduled runs (don't block node-cron)
+  // Create the fire-and-forget handler for node-cron
+  function createCronHandler() {
+    return () => {
       protectedTask("schedule").catch(() => {
         // Error already handled by onError hook
       });
-    },
-    cronOptions,
+    };
+  }
+
+  // Create the underlying node-cron task
+  let cronTask = cron.schedule(
+    currentExpression,
+    createCronHandler(),
+    buildCronOptions(),
   );
+
+  // Load history from storage if available
+  if (options.storage && options.name) {
+    options.storage
+      .getRuns(options.name, options.historyLimit ?? 10)
+      .then((records) => {
+        if (records.length > 0 && state.history.length === 0) {
+          // Convert stored records back to RunHistory
+          for (const record of records) {
+            const entry: RunHistory = {
+              startedAt: new Date(record.startedAt),
+              status: record.status,
+              triggeredBy: record.triggeredBy,
+            };
+            if (record.endedAt) entry.endedAt = new Date(record.endedAt);
+            if (record.duration !== undefined) entry.duration = record.duration;
+            if (record.error) entry.error = new Error(record.error);
+            state.history.push(entry);
+          }
+        }
+      })
+      .catch((err) => {
+        console.error(
+          `[cron-safe] Failed to load history for task "${options.name}":`,
+          err,
+        );
+      });
+  }
 
   // Return our wrapper object
   return {
@@ -148,16 +198,48 @@ export function schedule<T = unknown>(
       }
 
       try {
-        // node-cron's ScheduledTask has a method to get next dates
-        // We need to use the internal cronTime or parse the expression
         const cronParser = require("cron-parser");
-        const interval = cronParser.parseExpression(cronExpression, {
+        const interval = cronParser.parseExpression(currentExpression, {
           tz: options.timezone,
         });
         return interval.next().toDate();
       } catch {
-        // If parsing fails, return null
         return null;
+      }
+    },
+
+    getMetrics: (): TaskMetrics => {
+      // Return a copy
+      return { ...state.metrics };
+    },
+
+    updateSchedule: (newCronExpression: string): void => {
+      // Validate the new expression first
+      if (!cron.validate(newCronExpression)) {
+        throw new Error(`Invalid cron expression: "${newCronExpression}"`);
+      }
+
+      // Stop the old cron task
+      cronTask.stop();
+
+      // Update expression reference
+      currentExpression = newCronExpression;
+
+      // Create new cron task with same options but new expression
+      // Don't use runOnInit for updated schedules
+      const updateOpts = buildCronOptions();
+      updateOpts.runOnInit = false;
+      updateOpts.scheduled = true;
+
+      cronTask = cron.schedule(
+        newCronExpression,
+        createCronHandler(),
+        updateOpts,
+      );
+
+      // Maintain state
+      if (state.status !== "stopped") {
+        state.status = "scheduled";
       }
     },
   };

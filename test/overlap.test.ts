@@ -26,6 +26,9 @@ describe("cron-safe overlap prevention", () => {
 
     // Start first execution
     const firstTrigger = cronTask.trigger();
+
+    // Allow async setup to complete
+    await vi.advanceTimersByTimeAsync(0);
     expect(task).toHaveBeenCalledTimes(1);
 
     // Try to trigger second execution while first is running
@@ -67,10 +70,12 @@ describe("cron-safe overlap prevention", () => {
 
     // Start first execution
     const firstTrigger = cronTask.trigger();
+    await vi.advanceTimersByTimeAsync(0);
     expect(task).toHaveBeenCalledTimes(1);
 
     // Start second execution while first is running
     const secondTrigger = cronTask.trigger();
+    await vi.advanceTimersByTimeAsync(0);
     expect(task).toHaveBeenCalledTimes(2);
 
     // Complete both
@@ -122,6 +127,7 @@ describe("cron-safe overlap prevention", () => {
     expect(cronTask.getStatus()).toBe("scheduled");
 
     const triggerPromise = cronTask.trigger();
+    await vi.advanceTimersByTimeAsync(0);
     expect(cronTask.getStatus()).toBe("running");
 
     resolveTask!();
@@ -194,6 +200,9 @@ describe("cron-safe overlap prevention", () => {
 
     // Start first execution
     const firstTrigger = cronTask.trigger();
+
+    // Allow async setup
+    await vi.advanceTimersByTimeAsync(0);
 
     // Try second (will be skipped)
     await cronTask.trigger();

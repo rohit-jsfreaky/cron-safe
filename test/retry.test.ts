@@ -84,7 +84,8 @@ describe("cron-safe retry functionality", () => {
 
     const triggerPromise = cronTask.trigger();
 
-    // First call happens immediately
+    // Flush initial microtask so the first call actually runs
+    await vi.advanceTimersByTimeAsync(0);
     expect(task).toHaveBeenCalledTimes(1);
 
     // Advance time for first retry

@@ -22,7 +22,8 @@ describe("cron-safe backoff strategies", () => {
 
     const triggerPromise = cronTask.trigger();
 
-    // First call happens immediately
+    // Flush initial microtask so the first call actually runs
+    await vi.advanceTimersByTimeAsync(0);
     expect(task).toHaveBeenCalledTimes(1);
 
     // Advance 1000ms for first retry (fixed delay)
@@ -48,7 +49,8 @@ describe("cron-safe backoff strategies", () => {
 
     const triggerPromise = cronTask.trigger();
 
-    // First call happens immediately
+    // Flush microtask
+    await vi.advanceTimersByTimeAsync(0);
     expect(task).toHaveBeenCalledTimes(1);
 
     // Linear: delay * attempt
@@ -75,7 +77,8 @@ describe("cron-safe backoff strategies", () => {
 
     const triggerPromise = cronTask.trigger();
 
-    // First call happens immediately
+    // Flush microtask
+    await vi.advanceTimersByTimeAsync(0);
     expect(task).toHaveBeenCalledTimes(1);
 
     // Exponential: delay * 2^attempt
@@ -103,7 +106,8 @@ describe("cron-safe backoff strategies", () => {
 
     const triggerPromise = cronTask.trigger();
 
-    // First call happens immediately
+    // Flush microtask
+    await vi.advanceTimersByTimeAsync(0);
     expect(task).toHaveBeenCalledTimes(1);
 
     // Attempt 1: 1000 * 2^1 = 2000ms
