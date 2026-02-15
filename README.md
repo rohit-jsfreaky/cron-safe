@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/cron-safe.svg)](https://www.npmjs.com/package/cron-safe)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A robust wrapper around [node-cron](https://github.com/node-cron/node-cron) with **automatic retries**, **overlap prevention**, **execution timeout**, **history tracking**, and **structured error handling**.
+A robust wrapper around [node-cron](https://github.com/node-cron/node-cron) with **automatic retries**, **overlap prevention**, **distributed locking**, **concurrency control**, **execution timeout**, **history tracking**, **metrics**, **persistent storage**, and **structured error handling**.
 
 ## Why cron-safe?
 
@@ -14,14 +14,21 @@ Standard `node-cron` jobs are vulnerable to:
 - ❌ **Zombie tasks** — Hanging tasks that never complete block all future executions
 - ❌ **No visibility** — No way to see when tasks last ran or if they're currently running
 - ❌ **Unhandled rejections** — Async errors crash your process or go unnoticed
+- ❌ **Duplicate runs** — In multi-instance deployments, the same job runs on every server
+- ❌ **No persistence** — History and retry state lost after restart
 
 **cron-safe** wraps your tasks with a protective layer:
 
 - ✅ **Automatic retries** with configurable delays
 - ✅ **Exponential/linear backoff** — smart retry delays that grow over time
 - ✅ **Overlap prevention** — ensures only one instance runs at a time
+- ✅ **Distributed locking** — ensures only one instance runs across multiple servers (Redis, etc.)
+- ✅ **Concurrency control** — allow N parallel executions with `maxConcurrency`
 - ✅ **Execution timeout** — kills zombie tasks that run too long
 - ✅ **Execution history** — audit log of past runs with status and duration
+- ✅ **Persistent storage** — save history to database, survive restarts
+- ✅ **Metrics & observability** — track runs, failures, avg duration, export to Prometheus/OpenTelemetry
+- ✅ **Dynamic schedule update** — change cron expression at runtime without restart
 - ✅ **Next run predictor** — know exactly when your job runs next
 - ✅ **Async trigger** — manually trigger tasks and await results
 - ✅ **Notification hooks** — integrate with Slack, email, or any notification system
@@ -117,6 +124,187 @@ const task = schedule('* * * * *', async () => {
   },
 });
 ```
+
+### Concurrency Control
+
+Allow limited parallel executions instead of binary overlap prevention:
+
+```typescript
+import { schedule } from 'cron-safe';
+
+// Allow up to 3 concurrent executions
+const task = schedule('* * * * *', async () => {
+  await processQueue();
+}, {
+  maxConcurrency: 3,  // Allow 3 parallel runs
+
+  onOverlapSkip: () => {
+    console.log('Max concurrency reached, skipping');
+  },
+});
+```
+
+> When both `preventOverlap` and `maxConcurrency` are set, `maxConcurrency` takes priority. Setting `maxConcurrency: 1` is equivalent to `preventOverlap: true`.
+
+### Distributed Locking
+
+Ensure only one instance runs across multiple servers (Docker, PM2 cluster, auto-scaling):
+
+```typescript
+import { schedule, LockProvider } from 'cron-safe';
+
+// Implement the LockProvider interface for your lock backend
+const redisLockProvider: LockProvider = {
+  async acquire(key: string, ttl: number): Promise<string | null> {
+    // SET key uniqueId NX PX ttl
+    const lockId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const result = await redis.set(key, lockId, 'PX', ttl, 'NX');
+    return result === 'OK' ? lockId : null;
+  },
+
+  async release(key: string, lockId: string): Promise<void> {
+    // Only release if we still own the lock
+    const currentId = await redis.get(key);
+    if (currentId === lockId) {
+      await redis.del(key);
+    }
+  },
+
+  async extend(key: string, lockId: string, ttl: number): Promise<boolean> {
+    const currentId = await redis.get(key);
+    if (currentId === lockId) {
+      await redis.pexpire(key, ttl);
+      return true;
+    }
+    return false;
+  },
+};
+
+const task = schedule('0 * * * *', async () => {
+  await processOrders();
+}, {
+  name: 'order-processor',
+  distributedLock: {
+    provider: redisLockProvider,
+    ttl: 120000,        // Lock expires after 2 minutes
+    autoExtend: true,   // Auto-extend lock for long-running tasks
+    extendInterval: 60000, // Extend every 60 seconds
+  },
+});
+```
+
+> The lock is automatically released after task completion (success or failure). If the process crashes, the TTL ensures the lock eventually expires as a safety net.
+
+### Persistent Storage
+
+Save execution history to a database so data survives restarts and crashes:
+
+```typescript
+import { schedule, StorageAdapter, StoredRunRecord } from 'cron-safe';
+
+// Implement the StorageAdapter interface for your database
+const postgresAdapter: StorageAdapter = {
+  async saveRun(record: StoredRunRecord) {
+    await db.query('INSERT INTO cron_runs ...', record);
+  },
+
+  async updateRun(taskName: string, startedAt: string, updates: Partial<StoredRunRecord>) {
+    await db.query('UPDATE cron_runs SET ... WHERE task_name = $1 AND started_at = $2', ...);
+  },
+
+  async getRuns(taskName: string, limit: number) {
+    return db.query('SELECT * FROM cron_runs WHERE task_name = $1 ORDER BY started_at DESC LIMIT $2', taskName, limit);
+  },
+
+  async getLastIncompleteRun(taskName: string) {
+    return db.query("SELECT * FROM cron_runs WHERE task_name = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1", taskName);
+  },
+};
+
+const task = schedule('0 * * * *', async () => {
+  await generateReport();
+}, {
+  name: 'hourly-report',
+  storage: postgresAdapter,
+  historyLimit: 100,
+});
+```
+
+> On startup, cron-safe automatically loads the last N history records from storage, preserving your audit trail across restarts.
+
+### Metrics & Observability
+
+Track task performance in real-time:
+
+```typescript
+import { schedule } from 'cron-safe';
+
+const task = schedule('* * * * *', async () => {
+  await processData();
+}, {
+  name: 'data-processor',
+});
+
+// Get metrics snapshot
+const metrics = task.getMetrics();
+console.log(metrics);
+// {
+//   totalRuns: 150,
+//   totalSuccess: 145,
+//   totalFailures: 3,
+//   totalTimeouts: 2,
+//   totalRetries: 10,
+//   totalOverlapSkips: 5,
+//   currentRunning: 1,
+//   avgDuration: 2340,    // ms
+//   lastRunAt: Date,
+//   lastStatus: 'success'
+// }
+```
+
+#### Export to Prometheus / OpenTelemetry
+
+```typescript
+import { schedule, MetricsProvider } from 'cron-safe';
+
+const prometheusMetrics: MetricsProvider = {
+  recordEvent(taskName, event, duration) {
+    // Forward to your metrics system
+    cronRunsTotal.labels(taskName, event).inc();
+    if (duration) {
+      cronDurationHistogram.labels(taskName).observe(duration / 1000);
+    }
+  },
+};
+
+const task = schedule('* * * * *', processData, {
+  name: 'data-processor',
+  metricsProvider: prometheusMetrics,
+});
+```
+
+### Dynamic Schedule Update
+
+Change the cron expression at runtime without losing state:
+
+```typescript
+import { schedule } from 'cron-safe';
+
+const task = schedule('*/5 * * * *', async () => {
+  await syncData();
+}, {
+  name: 'data-sync',
+});
+
+// Later, update schedule via admin dashboard or feature flag
+task.updateSchedule('*/30 * * * *');  // Slow down to every 30 minutes
+
+// All history, metrics, and state are preserved
+console.log(task.getHistory().length);  // Still has previous history
+console.log(task.getMetrics());         // Still has accumulated metrics
+```
+
+> Throws an error if the new cron expression is invalid. The task must not be stopped when updating.
 
 ### Execution Timeout (Safety Valve)
 
@@ -230,7 +418,8 @@ const task = schedule('0 * * * *', async () => {
     success: true,      // default: true
     error: true,        // default: true
     timeout: true,      // default: true
-    overlapSkip: false, // default: false
+    overlapSkip: false,  // default: false
+    lockFailed: false,   // default: false
   },
 });
 ```
@@ -371,8 +560,12 @@ Schedules a task with automatic retries, timeout, and overlap prevention.
 | `backoffStrategy` | `'fixed' \| 'linear' \| 'exponential'` | `'fixed'` | How delay grows between retries |
 | `maxRetryDelay` | `number` | `undefined` | Maximum delay cap for backoff |
 | `preventOverlap` | `boolean` | `false` | Skip execution if previous run is active |
+| `maxConcurrency` | `number` | `undefined` | Max concurrent executions allowed |
 | `executionTimeout` | `number` | `undefined` | Max execution time in ms before timeout |
 | `historyLimit` | `number` | `10` | Max number of history entries to keep |
+| `distributedLock` | `DistributedLockConfig` | — | Distributed locking configuration |
+| `storage` | `StorageAdapter` | — | Persistent storage adapter |
+| `metricsProvider` | `MetricsProvider` | — | External metrics export provider |
 | `onStart` | `() => void` | — | Called when task starts |
 | `onSuccess` | `(result: T) => void` | — | Called with result on success |
 | `onRetry` | `(error, attempt) => void` | — | Called before each retry |
@@ -380,10 +573,50 @@ Schedules a task with automatic retries, timeout, and overlap prevention.
 | `onTimeout` | `(error: Error) => void` | — | Called when task times out |
 | `onOverlapSkip` | `() => void` | — | Called when execution is skipped |
 | `notifier` | `Notifier<T>` | — | Callback for Slack/email/custom notifications |
-| `notifyOn` | `NotifyOn` | `{ success: true, error: true, timeout: true, overlapSkip: false }` | Which events trigger notifications |
+| `notifyOn` | `NotifyOn` | `{ success: true, error: true, timeout: true, overlapSkip: false, lockFailed: false }` | Which events trigger notifications |
 | `timezone` | `string` | — | Timezone for cron schedule |
 | `scheduled` | `boolean` | `true` | Start immediately or wait for `.start()` |
 | `runOnInit` | `boolean` | `false` | Run task immediately on creation |
+
+### `DistributedLockConfig`
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `provider` | `LockProvider` | — | Lock provider implementation (required) |
+| `ttl` | `number` | `60000` | Lock time-to-live in ms |
+| `autoExtend` | `boolean` | `false` | Auto-extend lock while task is running |
+| `extendInterval` | `number` | `ttl / 2` | Interval in ms for auto-extending |
+
+### `LockProvider`
+
+Interface to implement for your distributed lock backend:
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `acquire` | `(key: string, ttl: number) => Promise<string \| null>` | Acquire lock, return lock ID or null |
+| `release` | `(key: string, lockId: string) => Promise<void>` | Release the lock |
+| `extend?` | `(key: string, lockId: string, ttl: number) => Promise<boolean>` | Extend lock TTL (optional) |
+
+### `StorageAdapter`
+
+Interface to implement for persistent storage:
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `saveRun` | `(record: StoredRunRecord) => Promise<void>` | Save a new run record |
+| `updateRun` | `(taskName, startedAt, updates) => Promise<void>` | Update an existing run |
+| `getRuns` | `(taskName, limit) => Promise<StoredRunRecord[]>` | Get recent runs |
+| `getLastIncompleteRun?` | `(taskName) => Promise<StoredRunRecord \| null>` | Get crashed run (optional) |
+
+### `MetricsProvider`
+
+Interface for metrics export:
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `recordEvent` | `(taskName, event, duration?) => void` | Record a task event |
+
+Events: `'start'`, `'success'`, `'failure'`, `'timeout'`, `'retry'`, `'overlapSkip'`
 
 ### `CronSafeTask<T>`
 
@@ -397,6 +630,23 @@ The object returned by `schedule()`:
 | `trigger()` | `Promise<T \| undefined>` | Execute immediately, returns result |
 | `getHistory()` | `RunHistory[]` | Get execution history (newest first) |
 | `nextRun()` | `Date \| null` | Next scheduled run time |
+| `getMetrics()` | `TaskMetrics` | Get real-time metrics snapshot |
+| `updateSchedule(expr)` | `void` | Change cron expression at runtime |
+
+### `TaskMetrics`
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `totalRuns` | `number` | Total number of runs started |
+| `totalSuccess` | `number` | Number of successful completions |
+| `totalFailures` | `number` | Number of failed runs |
+| `totalTimeouts` | `number` | Number of timed out runs |
+| `totalRetries` | `number` | Total retry attempts across all runs |
+| `totalOverlapSkips` | `number` | Number of runs skipped due to overlap |
+| `currentRunning` | `number` | Number of currently executing runs |
+| `avgDuration` | `number` | Average execution duration in ms |
+| `lastRunAt` | `Date \| undefined` | When the last run completed |
+| `lastStatus` | `string \| undefined` | Status of the last completed run |
 
 ### `RunHistory`
 
@@ -464,7 +714,7 @@ schedule('* * * * *', async () => {
 Full TypeScript support with strict types:
 
 ```typescript
-import { schedule, CronSafeOptions, CronSafeTask, RunHistory } from 'cron-safe';
+import { schedule, CronSafeOptions, CronSafeTask, RunHistory, TaskMetrics } from 'cron-safe';
 
 interface ReportResult {
   rowsProcessed: number;
@@ -493,4 +743,8 @@ if (result) {
 
 // History is also typed
 const history: RunHistory[] = task.getHistory();
+
+// Metrics snapshot
+const metrics: TaskMetrics = task.getMetrics();
+console.log(`Success rate: ${(metrics.totalSuccess / metrics.totalRuns * 100).toFixed(1)}%`);
 ```
